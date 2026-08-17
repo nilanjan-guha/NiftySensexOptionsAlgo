@@ -1,0 +1,6 @@
+azure-functions
+pandas
+numpy
+python-dotenv
+kiteconnect
+openpyxl

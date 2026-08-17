@@ -1,0 +1,180 @@
+# name: Nifty Sensex Trading Bot
+
+# on:
+#   workflow_dispatch:
+
+#   schedule:
+#     # 09:15 IST = 03:45 UTC
+#     - cron: "45 3 * * 1-5"
+
+# jobs:
+#   trading-bot:
+#     runs-on: ubuntu-latest
+
+#     steps:
+#       # -------------------------------------------------
+#       # 1. Checkout code
+#       # -------------------------------------------------
+#       - name: Checkout repository
+#         uses: actions/checkout@v4
+
+#       # -------------------------------------------------
+#       # 2. Setup Python
+#       # -------------------------------------------------
+#       - name: Set up Python
+#         uses: actions/setup-python@v5
+#         with:
+#           python-version: "3.12"
+
+#       # -------------------------------------------------
+#       # 3. Install dependencies
+#       # -------------------------------------------------
+#       - name: Install dependencies
+#         run: |
+#           python -m pip install --upgrade pip
+#           pip install -r requirements.txt
+
+#       # -------------------------------------------------
+#       # 4. Get fresh Zerodha access token
+#       # -------------------------------------------------
+#       - name: Get Zerodha access token
+#         env:
+#           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+
+#         run: |
+
+#           curl -f \
+#             -H "Authorization: Bearer $BOT_TOKEN" \
+#             "https://nifty-zerodha-login.nilanjanguha8.workers.dev/token" \
+#             -o access_token.txt
+
+#           if [ ! -s access_token.txt ]; then
+#             echo "ERROR: Zerodha access token was not received."
+#             exit 1
+#           fi
+
+#           echo "Zerodha access token received successfully."
+
+#       # -------------------------------------------------
+#       # 5. Run paper trading bot
+#       # -------------------------------------------------
+#       - name: Run trading bot
+#         env:
+#           KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
+
+#         run: |
+
+#           export KITE_ACCESS_TOKEN="$(cat access_token.txt)"
+
+#           python live_trader.py
+
+name: Nifty Sensex Trading Bot
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # 09:15 IST = 03:45 UTC
+    # Monday to Friday
+    - cron: "45 3 * * 1-5"
+
+jobs:
+  trading-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      # =================================================
+      # 1. CHECKOUT REPOSITORY
+      # =================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # =================================================
+      # 2. SETUP PYTHON
+      # =================================================
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # =================================================
+      # 3. INSTALL DEPENDENCIES
+      # =================================================
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # =================================================
+      # 4. GET FRESH ZERODHA ACCESS TOKEN
+      # =================================================
+
+      - name: Get Zerodha access token
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+
+        run: |
+
+          echo "=========================================="
+          echo "     GETTING ZERODHA ACCESS TOKEN"
+          echo "=========================================="
+
+          curl -f \
+            -H "Authorization: Bearer $BOT_TOKEN" \
+            "https://nifty-zerodha-login.nilanjanguha8.workers.dev/token" \
+            -o access_token.txt
+
+          if [ ! -s access_token.txt ]; then
+            echo "ERROR: Zerodha access token was not received."
+            exit 1
+          fi
+
+          echo "Zerodha access token received successfully."
+
+      # =================================================
+      # 5. RUN TRADING BOT
+      #
+      # live_trader.py runs continuously.
+      #
+      # It:
+      #
+      # 09:15 -> starts checking
+      # Every 5 minutes -> checks NIFTY + SENSEX
+      # 14:45 -> no new entries
+      # 15:30 -> stops completely
+      #
+      # -u = unbuffered Python output
+      # This makes logs appear immediately in GitHub.
+      # =================================================
+
+      - name: Run trading bot
+        env:
+          KITE_API_KEY: ${{ secrets.KITE_API_KEY }}
+
+        run: |
+
+          echo "=========================================="
+          echo "       STARTING TRADING BOT"
+          echo "=========================================="
+
+          export KITE_ACCESS_TOKEN="$(cat access_token.txt)"
+
+          python -u live_trader.py
+
+      # =================================================
+      # 6. BOT COMPLETED
+      # =================================================
+
+      - name: Trading bot completed
+        if: success()
+        run: |
+
+          echo "=========================================="
+          echo "       TRADING BOT COMPLETED"
+          echo "=========================================="
+
+          echo "Bot stopped normally."
+          echo "Market session finished."
