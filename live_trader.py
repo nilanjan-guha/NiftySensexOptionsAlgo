@@ -1984,6 +1984,7 @@ from strategy import (
     find_sensex_setups,
     find_premium_setups,
     find_sensex_premium_setups,
+    get_setup_strength,
     calculate_dynamic_risk,
     MAX_SETUP_GAP_MINUTES,
 )
@@ -2035,7 +2036,9 @@ TIMEFRAME = "5minute"
 MARKET_OPEN = dt_time(9, 15)
 ENTRY_START = dt_time(9, 20)
 ENTRY_END = dt_time(14, 45)
+
 FORCE_EXIT_TIME = dt_time(15, 15)
+
 MARKET_CLOSE = dt_time(15, 30)
 
 
@@ -2043,7 +2046,7 @@ MARKET_CLOSE = dt_time(15, 30)
 # BOT LOOP
 # =========================================================
 
-CHECK_INTERVAL_SECONDS = 300
+CHECK_INTERVAL_SECONDS = 60
 WAIT_BEFORE_MARKET_SECONDS = 30
 
 
@@ -2052,15 +2055,6 @@ WAIT_BEFORE_MARKET_SECONDS = 30
 # =========================================================
 
 MAX_TRADES_PER_DAY = 3
-TRADE_COOLDOWN_SECONDS = 10
-
-
-# =========================================================
-# RISK
-# =========================================================
-
-DEFAULT_RR = 2.0
-SL_BUFFER = 0.50
 
 
 # =========================================================
@@ -2098,28 +2092,42 @@ DASHBOARD_DATA_FILE = os.path.join(
 
 load_dotenv()
 
-API_KEY = os.getenv("KITE_API_KEY")
+API_KEY = os.getenv(
+    "KITE_API_KEY"
+)
 
 if not API_KEY:
-    raise SystemExit("KITE_API_KEY missing.")
+    raise SystemExit(
+        "KITE_API_KEY missing."
+    )
+
 
 ACCESS_TOKEN = os.getenv(
     "KITE_ACCESS_TOKEN"
 )
 
+
 if not ACCESS_TOKEN:
-    if os.path.exists(ACCESS_TOKEN_FILE):
+
+    if os.path.exists(
+        ACCESS_TOKEN_FILE
+    ):
+
         with open(
             ACCESS_TOKEN_FILE,
             "r",
             encoding="utf-8"
         ) as f:
+
             ACCESS_TOKEN = f.read().strip()
+
     else:
+
         raise SystemExit(
             "KITE_ACCESS_TOKEN is not set "
             "and access_token.txt was not found."
         )
+
 
 if not ACCESS_TOKEN:
     raise SystemExit(
@@ -2141,42 +2149,99 @@ kite.set_access_token(
 
 
 # =========================================================
+# STATE
+# =========================================================
+
+# PAPER position currently open.
+PAPER_POSITION = None
+
+
+# Prevent the same setup from being
+# executed more than once.
+PROCESSED_SIGNALS = set()
+
+
+# Number of trades executed today.
+TRADES_TODAY = 0
+
+
+# Date for daily counter.
+TRADING_DATE = None
+
+
+# =========================================================
 # TIME
 # =========================================================
 
 def now_ist():
+
     return pd.Timestamp.now(
         tz="Asia/Kolkata"
     )
 
 
 # =========================================================
-# DASHBOARD
+# DAILY STATE
+# =========================================================
+
+def reset_daily_state_if_needed():
+
+    global TRADES_TODAY
+    global TRADING_DATE
+    global PROCESSED_SIGNALS
+
+    today = now_ist().date()
+
+    if TRADING_DATE != today:
+
+        TRADING_DATE = today
+
+        TRADES_TODAY = 0
+
+        PROCESSED_SIGNALS = set()
+
+
+# =========================================================
+# DASHBOARD DATA
 # =========================================================
 
 def _dashboard_rows():
+
     if not os.path.exists(
         DASHBOARD_DATA_FILE
     ):
+
         return []
 
     try:
+
         with open(
             DASHBOARD_DATA_FILE,
             "r",
             encoding="utf-8"
         ) as f:
+
             data = json.load(f)
 
-        return data if isinstance(data, list) else []
+        if isinstance(data, list):
+            return data
+
+        return []
 
     except Exception:
+
         return []
 
 
+# =========================================================
+# SAVE DASHBOARD DATA
+# =========================================================
+
 def _save_dashboard_rows(rows):
+
     temp_file = (
-        DASHBOARD_DATA_FILE + ".tmp"
+        DASHBOARD_DATA_FILE
+        + ".tmp"
     )
 
     with open(
@@ -2184,10 +2249,12 @@ def _save_dashboard_rows(rows):
         "w",
         encoding="utf-8"
     ) as f:
+
         json.dump(
             rows,
             f,
-            indent=2
+            indent=2,
+            default=str
         )
 
     os.replace(
@@ -2196,7 +2263,12 @@ def _save_dashboard_rows(rows):
     )
 
 
+# =========================================================
+# CREATE DASHBOARD
+# =========================================================
+
 def create_dashboard():
+
     rows = _dashboard_rows()
 
     mode = (
@@ -2210,15 +2282,22 @@ def create_dashboard():
         <span>MODE</span>
         <strong>{mode}</strong>
     </div>
+
     <div class="card">
         <span>TRADES</span>
         <strong>{len(rows)}</strong>
+    </div>
+
+    <div class="card">
+        <span>TODAY</span>
+        <strong>{TRADES_TODAY}</strong>
     </div>
     """
 
     table_rows = ""
 
     for trade in reversed(rows):
+
         table_rows += f"""
         <tr>
             <td>{html.escape(str(trade.get("time", "")))}</td>
@@ -2232,26 +2311,35 @@ def create_dashboard():
             <td>{html.escape(str(trade.get("target", "")))}</td>
             <td>{html.escape(str(trade.get("risk_points", "")))}</td>
             <td>{html.escape(str(trade.get("status", "")))}</td>
+            <td>{html.escape(str(trade.get("exit", "")))}</td>
+            <td>{html.escape(str(trade.get("pnl", "")))}</td>
         </tr>
         """
 
     if not table_rows:
+
         table_rows = """
         <tr>
-            <td colspan="11" class="empty">
+            <td colspan="13" class="empty">
                 No trades yet
             </td>
         </tr>
         """
 
     page = f"""<!DOCTYPE html>
+
 <html>
+
 <head>
+
 <meta charset="UTF-8">
+
 <meta http-equiv="refresh" content="5">
+
 <title>NIFTY SENSEX Trading Dashboard</title>
 
 <style>
+
 * {{
     box-sizing: border-box;
 }}
@@ -2330,14 +2418,8 @@ tr:hover {{
     padding: 30px;
 }}
 
-.paper {{
-    color: #facc15;
-}}
-
-.live {{
-    color: #4ade80;
-}}
 </style>
+
 </head>
 
 <body>
@@ -2345,8 +2427,7 @@ tr:hover {{
 <h1>NIFTY + SENSEX Trading Dashboard</h1>
 
 <div class="subtitle">
-    Automatically updated whenever a PAPER or LIVE trade is placed.
-    Page refreshes every 5 seconds.
+    PAPER and LIVE trades automatically updated.
 </div>
 
 <div class="cards">
@@ -2354,7 +2435,9 @@ tr:hover {{
 </div>
 
 <table>
+
 <thead>
+
 <tr>
     <th>Time</th>
     <th>Mode</th>
@@ -2367,26 +2450,36 @@ tr:hover {{
     <th>Target</th>
     <th>Risk</th>
     <th>Status</th>
+    <th>Exit</th>
+    <th>P&L</th>
 </tr>
+
 </thead>
 
 <tbody>
+
 {table_rows}
+
 </tbody>
 
 </table>
 
 </body>
+
 </html>
 """
 
-    temp_file = DASHBOARD_FILE + ".tmp"
+    temp_file = (
+        DASHBOARD_FILE
+        + ".tmp"
+    )
 
     with open(
         temp_file,
         "w",
         encoding="utf-8"
     ) as f:
+
         f.write(page)
 
     os.replace(
@@ -2395,92 +2488,191 @@ tr:hover {{
     )
 
 
+# =========================================================
+# RECORD TRADE
+# =========================================================
+
 def record_trade(
     signal,
     status,
     order_id=""
 ):
+
     trade = {
-        "time": str(now_ist()),
+        "time": str(
+            now_ist()
+        ),
+
         "mode": (
             "LIVE"
             if LIVE_MODE
             else "PAPER"
         ),
+
         "market": signal.get(
             "market",
             ""
         ),
+
         "direction": signal.get(
             "direction",
             ""
         ),
+
         "symbol": signal.get(
             "option_symbol",
             ""
         ),
+
         "quantity": signal.get(
             "quantity",
             0
         ),
+
         "entry": round(
-            float(signal.get(
-                "entry",
-                0
-            )),
+            float(
+                signal.get(
+                    "entry",
+                    0
+                )
+            ),
             2
         ),
+
         "stop_loss": round(
-            float(signal.get(
-                "stop_loss",
-                0
-            )),
+            float(
+                signal.get(
+                    "stop_loss",
+                    0
+                )
+            ),
             2
         ),
+
         "target": round(
-            float(signal.get(
-                "target",
-                0
-            )),
+            float(
+                signal.get(
+                    "target",
+                    0
+                )
+            ),
             2
         ),
+
         "risk_points": round(
-            float(signal.get(
-                "risk_points",
-                0
-            )),
+            float(
+                signal.get(
+                    "risk_points",
+                    0
+                )
+            ),
             2
         ),
+
         "status": status,
+
         "order_id": order_id,
+
+        "exit": signal.get(
+            "exit",
+            ""
+        ),
+
+        "pnl": signal.get(
+            "pnl",
+            ""
+        ),
     }
 
     rows = _dashboard_rows()
 
-    rows.append(trade)
+    rows.append(
+        trade
+    )
 
-    _save_dashboard_rows(rows)
+    _save_dashboard_rows(
+        rows
+    )
 
     create_dashboard()
 
     print()
-    print("==========================================")
-    print("       DASHBOARD TRADE RECORDED")
-    print("==========================================")
-    print("MODE:", trade["mode"])
-    print("MARKET:", trade["market"])
-    print("DIRECTION:", trade["direction"])
-    print("SYMBOL:", trade["symbol"])
-    print("ENTRY:", trade["entry"])
-    print("SL:", trade["stop_loss"])
-    print("TARGET:", trade["target"])
-    print("STATUS:", trade["status"])
+    print(
+        "=========================================="
+    )
+    print(
+        "       DASHBOARD TRADE RECORDED"
+    )
+    print(
+        "=========================================="
+    )
+
+    print(
+        "MODE:",
+        trade["mode"]
+    )
+
+    print(
+        "MARKET:",
+        trade["market"]
+    )
+
+    print(
+        "DIRECTION:",
+        trade["direction"]
+    )
+
+    print(
+        "SYMBOL:",
+        trade["symbol"]
+    )
+
+    print(
+        "ENTRY:",
+        trade["entry"]
+    )
+
+    print(
+        "SL:",
+        trade["stop_loss"]
+    )
+
+    print(
+        "TARGET:",
+        trade["target"]
+    )
+
+    print(
+        "STATUS:",
+        trade["status"]
+    )
+
+    if trade["exit"] != "":
+        print(
+            "EXIT:",
+            trade["exit"]
+        )
+
+    if trade["pnl"] != "":
+        print(
+            "P&L:",
+            trade["pnl"]
+        )
 
     if order_id:
-        print("ORDER ID:", order_id)
+        print(
+            "ORDER ID:",
+            order_id
+        )
 
-    print("DASHBOARD:", DASHBOARD_FILE)
-    print("==========================================")
+    print(
+        "DASHBOARD:",
+        DASHBOARD_FILE
+    )
+
+    print(
+        "=========================================="
+    )
 
 
 # =========================================================
@@ -2488,6 +2680,7 @@ def record_trade(
 # =========================================================
 
 def market_is_open():
+
     t = now_ist().time()
 
     return (
@@ -2497,7 +2690,12 @@ def market_is_open():
     )
 
 
+# =========================================================
+# ENTRY WINDOW
+# =========================================================
+
 def entry_window_open():
+
     t = now_ist().time()
 
     return (
@@ -2507,7 +2705,12 @@ def entry_window_open():
     )
 
 
+# =========================================================
+# MARKET CLOSED
+# =========================================================
+
 def market_has_closed():
+
     return (
         now_ist().time()
         >= MARKET_CLOSE
@@ -2519,27 +2722,36 @@ def market_has_closed():
 # =========================================================
 
 def test_connection():
+
     try:
+
         profile = kite.profile()
 
         print(
             "ZERODHA:",
-            profile.get("user_name")
+            profile.get(
+                "user_name"
+            )
         )
 
         print(
             "USER ID:",
-            profile.get("user_id")
+            profile.get(
+                "user_id"
+            )
         )
 
         print(
             "MODE:",
-            "LIVE" if LIVE_MODE else "PAPER"
+            "LIVE"
+            if LIVE_MODE
+            else "PAPER"
         )
 
         return True
 
     except Exception as exc:
+
         print(
             "ZERODHA CONNECTION ERROR:",
             type(exc).__name__,
@@ -2554,6 +2766,7 @@ def test_connection():
 # =========================================================
 
 def fetch_today_candles(token):
+
     now = now_ist()
 
     start = pd.Timestamp(
@@ -2566,14 +2779,16 @@ def fetch_today_candles(token):
     )
 
     try:
+
         return kite.historical_data(
-            instrument_token=token,
+            instrument_token=int(token),
             from_date=start.to_pydatetime(),
             to_date=now.to_pydatetime(),
             interval=TIMEFRAME,
         )
 
     except Exception as exc:
+
         print(
             "DATA ERROR:",
             type(exc).__name__,
@@ -2588,17 +2803,21 @@ def fetch_today_candles(token):
 # =========================================================
 
 def remove_current_candle(df):
+
     if df.empty:
         return df
 
-    current_start = now_ist().floor("5min")
+    current_start = (
+        now_ist()
+        .floor("5min")
+    )
 
-    return (
-        df[
-            df["date"] < current_start
-        ]
-        .copy()
-        .reset_index(drop=True)
+    result = df[
+        df["date"] < current_start
+    ].copy()
+
+    return result.reset_index(
+        drop=True
     )
 
 
@@ -2607,14 +2826,21 @@ def remove_current_candle(df):
 # =========================================================
 
 def get_spot(symbol):
+
     try:
-        data = kite.quote([symbol])
+
+        data = kite.quote(
+            [symbol]
+        )
 
         return float(
-            data[symbol]["last_price"]
+            data[symbol][
+                "last_price"
+            ]
         )
 
     except Exception as exc:
+
         print(
             "SPOT ERROR:",
             symbol,
@@ -2629,10 +2855,15 @@ def get_spot(symbol):
 # =========================================================
 
 def get_instruments(exchange):
+
     try:
-        return kite.instruments(exchange)
+
+        return kite.instruments(
+            exchange
+        )
 
     except Exception as exc:
+
         print(
             "INSTRUMENT ERROR:",
             exchange,
@@ -2652,40 +2883,65 @@ def find_option(
     direction,
     spot
 ):
+
     atm = (
         round(
-            spot /
-            config["strike_interval"]
+            spot
+            /
+            config[
+                "strike_interval"
+            ]
         )
-        * config["strike_interval"]
+        *
+        config[
+            "strike_interval"
+        ]
     )
 
-    today = date.today()
+    today = now_ist().date()
+
     candidates = []
 
     for instrument in instruments:
+
         try:
-            if instrument.get("name") != \
-                    config["underlying_name"]:
+
+            if instrument.get(
+                "name"
+            ) != config[
+                "underlying_name"
+            ]:
                 continue
 
-            if instrument.get("instrument_type") != \
-                    direction:
+            if instrument.get(
+                "instrument_type"
+            ) != direction:
                 continue
 
             if float(
-                instrument.get("strike", 0)
+                instrument.get(
+                    "strike",
+                    0
+                )
             ) != float(atm):
                 continue
 
-            expiry = instrument.get("expiry")
+            expiry = instrument.get(
+                "expiry"
+            )
 
-            if not expiry or expiry < today:
+            if not expiry:
                 continue
 
-            candidates.append(instrument)
+            if expiry < today:
+                continue
+
+            candidates.append(
+                instrument
+            )
 
         except Exception:
+
             continue
 
     if not candidates:
@@ -2706,22 +2962,31 @@ def option_ltp(
     exchange,
     symbol
 ):
+
     try:
+
         key = (
-            exchange +
-            ":" +
-            symbol
+            exchange
+            + ":"
+            + symbol
         )
 
-        data = kite.ltp([key])
+        data = kite.ltp(
+            [key]
+        )
 
         return float(
-            data[key]["last_price"]
+            data[key][
+                "last_price"
+            ]
         )
 
     except Exception as exc:
+
         print(
             "LTP ERROR:",
+            exchange,
+            symbol,
             str(exc)
         )
 
@@ -2729,7 +2994,7 @@ def option_ltp(
 
 
 # =========================================================
-# SIGNAL FOR ONE MARKET
+# BUILD SIGNAL
 # =========================================================
 
 def check_market(
@@ -2737,65 +3002,132 @@ def check_market(
     config,
     option_instruments
 ):
+
     print()
-    print("==========================================")
-    print("CHECKING:", market_name)
-    print("==========================================")
+    print(
+        "=========================================="
+    )
+    print(
+        "CHECKING:",
+        market_name
+    )
+    print(
+        "=========================================="
+    )
+
+    # -----------------------------------------------------
+    # INDEX CANDLES
+    # -----------------------------------------------------
 
     raw = fetch_today_candles(
-        config["index_token"]
+        config[
+            "index_token"
+        ]
     )
 
     if not raw:
-        print("No", market_name, "data.")
+
+        print(
+            "No",
+            market_name,
+            "data."
+        )
+
         return None
 
-    df = calculate_indicators(raw)
-    df = remove_current_candle(df)
+    df = calculate_indicators(
+        raw
+    )
+
+    df = remove_current_candle(
+        df
+    )
 
     if len(df) < 2:
+
         print(
             "Not enough completed",
             market_name,
             "candles."
         )
+
         return None
 
     latest = df.iloc[-1]
 
-    print("Latest:", latest["date"])
+    print(
+        "Latest:",
+        latest["date"]
+    )
+
     print(
         "Close:",
-        round(float(latest["close"]), 2)
+        round(
+            float(
+                latest["close"]
+            ),
+            2
+        )
     )
 
     print(
         "EMA20:",
-        round(float(latest["ema20"]), 2)
+        round(
+            float(
+                latest["ema20"]
+            ),
+            2
+        )
     )
 
     print(
         "VWAP:",
-        round(float(latest["vwap"]), 2)
+        round(
+            float(
+                latest["vwap"]
+            ),
+            2
+        )
     )
 
+    # -----------------------------------------------------
+    # UNDERLYING SETUP
+    # -----------------------------------------------------
+
     if market_name == "NIFTY":
-        setups = find_nifty_setups(df)
+
+        setups = find_nifty_setups(
+            df
+        )
+
     else:
-        setups = find_sensex_setups(df)
+
+        setups = find_sensex_setups(
+            df
+        )
 
     if not setups:
+
         print(
             market_name,
             "SETUP: NONE"
         )
+
         return None
 
     setup = setups[-1]
 
-    direction = setup["direction"]
-    breakout = setup["breakout"]
-    pullback = setup["pullback"]
+    direction = setup[
+        "direction"
+    ]
+
+    breakout = setup[
+        "breakout"
+    ]
+
+    pullback = setup[
+        "pullback"
+    ]
 
     print(
         market_name,
@@ -2813,12 +3145,25 @@ def check_market(
         pullback["date"]
     )
 
-    spot = get_spot(
-        config["spot_symbol"]
+    # -----------------------------------------------------
+    # IMPORTANT:
+    # SAME SPOT REFERENCE AS BACKTEST
+    # -----------------------------------------------------
+
+    spot = float(
+        pullback[
+            "close"
+        ]
     )
 
-    if spot is None:
-        return None
+    print(
+        "Underlying reference spot:",
+        spot
+    )
+
+    # -----------------------------------------------------
+    # OPTION
+    # -----------------------------------------------------
 
     option = find_option(
         option_instruments,
@@ -2828,20 +3173,34 @@ def check_market(
     )
 
     if option is None:
-        print("Option not found.")
+
+        print(
+            "Option not found."
+        )
+
         return None
 
-    option_symbol = option["tradingsymbol"]
-    option_token = option["instrument_token"]
+    option_symbol = option[
+        "tradingsymbol"
+    ]
+
+    option_token = option[
+        "instrument_token"
+    ]
 
     option_lot = int(
         option.get(
             "lot_size",
-            config["default_lot"]
+            config[
+                "default_lot"
+            ]
         )
     )
 
-    quantity = option_lot * LOTS
+    quantity = (
+        option_lot
+        * LOTS
+    )
 
     print(
         "Option:",
@@ -2850,7 +3209,9 @@ def check_market(
 
     print(
         "Exchange:",
-        config["option_exchange"]
+        config[
+            "option_exchange"
+        ]
     )
 
     print(
@@ -2863,12 +3224,20 @@ def check_market(
         quantity
     )
 
+    # -----------------------------------------------------
+    # PREMIUM CANDLES
+    # -----------------------------------------------------
+
     premium_raw = fetch_today_candles(
         option_token
     )
 
     if not premium_raw:
-        print("No premium candles.")
+
+        print(
+            "No premium candles."
+        )
+
         return None
 
     premium_df = calculate_indicators(
@@ -2880,113 +3249,418 @@ def check_market(
     )
 
     if len(premium_df) < 2:
+
         return None
 
+    # -----------------------------------------------------
+    # PREMIUM SETUP
+    # -----------------------------------------------------
+
     if market_name == "NIFTY":
-        premium_setups = find_premium_setups(
-            premium_df,
-            pd.Timestamp(breakout["date"]),
-            pd.Timestamp(pullback["date"])
+
+        premium_setups = (
+            find_premium_setups(
+                premium_df,
+                pd.Timestamp(
+                    breakout["date"]
+                ),
+                pd.Timestamp(
+                    pullback["date"]
+                )
+            )
         )
+
     else:
-        premium_setups = find_sensex_premium_setups(
-            premium_df,
-            pd.Timestamp(breakout["date"]),
-            pd.Timestamp(pullback["date"])
+
+        premium_setups = (
+            find_sensex_premium_setups(
+                premium_df,
+                pd.Timestamp(
+                    breakout["date"]
+                ),
+                pd.Timestamp(
+                    pullback["date"]
+                )
+            )
         )
 
     if not premium_setups:
-        print("Premium setup: NONE")
+
+        print(
+            "Premium setup: NONE"
+        )
+
         return None
 
-    premium_setup = premium_setups[-1]
-
-    premium_breakout = premium_setup["breakout"]
-    premium_pullback = premium_setup["pullback"]
-
-    latest_premium = premium_df.iloc[-1]
-
-    if (
-        pd.Timestamp(
-            premium_pullback["date"]
-        )
-        !=
-        pd.Timestamp(
-            latest_premium["date"]
-        )
-    ):
-        print("Premium setup is old.")
-        return None
-
-    entry = float(
-        premium_pullback["close"]
+    premium_setup = (
+        premium_setups[-1]
     )
+
+    premium_breakout = (
+        premium_setup[
+            "breakout"
+        ]
+    )
+
+    premium_pullback = (
+        premium_setup[
+            "pullback"
+        ]
+    )
+
+    premium_confirmation = (
+        premium_setup.get(
+            "confirmation"
+        )
+    )
+
+    print(
+        "Premium breakout:",
+        premium_breakout["date"]
+    )
+
+    print(
+        "Premium pullback:",
+        premium_pullback["date"]
+    )
+
+    if premium_confirmation is not None:
+
+        print(
+            "Premium confirmation:",
+            premium_confirmation["date"]
+        )
+
+    else:
+
+        print(
+            "Premium confirmation: NONE"
+        )
+
+    # -----------------------------------------------------
+    # SETUP FRESHNESS
+    # -----------------------------------------------------
+
+    premium_pullback_time = (
+        pd.Timestamp(
+            premium_pullback[
+                "date"
+            ]
+        )
+    )
+
+    latest_premium_time = (
+        pd.Timestamp(
+            premium_df.iloc[-1][
+                "date"
+            ]
+        )
+    )
+
+    gap_minutes = (
+        latest_premium_time
+        -
+        premium_pullback_time
+    ).total_seconds() / 60
+
+    print(
+        "Premium setup age:",
+        round(
+            gap_minutes,
+            2
+        ),
+        "minutes"
+    )
+
+    if gap_minutes < 0:
+
+        print(
+            "Premium setup is from future."
+        )
+
+        return None
+
+    if gap_minutes > MAX_SETUP_GAP_MINUTES:
+
+        print(
+            "Premium setup expired."
+        )
+
+        return None
+
+    # -----------------------------------------------------
+    # ENTRY
+    # -----------------------------------------------------
+
+    entry_time = pd.Timestamp(
+        premium_pullback[
+            "date"
+        ]
+    )
+
+    matching = premium_df.index[
+        premium_df["date"]
+        ==
+        entry_time
+    ].tolist()
+
+    if not matching:
+
+        print(
+            "Premium entry candle not found."
+        )
+
+        return None
+
+    entry_index = matching[0]
+
+    # Same entry price as backtest.
+    entry = float(
+        premium_pullback[
+            "close"
+        ]
+    )
+
+    print(
+        "Entry:",
+        round(
+            entry,
+            2
+        )
+    )
+
+    # -----------------------------------------------------
+    # SETUP STRENGTH
+    # SAME AS BACKTEST
+    # -----------------------------------------------------
+
+    setup_strength = (
+        get_setup_strength(
+            pullback,
+            pullback,
+            premium_breakout,
+            premium_pullback,
+            premium_confirmation,
+        )
+    )
+
+    print(
+        "Setup strength:",
+        setup_strength
+    )
+
+    # -----------------------------------------------------
+    # DYNAMIC RISK
+    # SAME AS BACKTEST
+    # -----------------------------------------------------
 
     risk = calculate_dynamic_risk(
         entry,
         premium_pullback,
-        premium_pullback,
-        direction
+        premium_confirmation,
+        direction,
+        setup_strength,
     )
 
     if risk is None:
-        print("Invalid risk.")
+
+        print(
+            "Invalid risk."
+        )
+
         return None
 
+    print(
+        "Stop loss:",
+        round(
+            float(
+                risk["stop_loss"]
+            ),
+            2
+        )
+    )
+
+    print(
+        "Risk points:",
+        round(
+            float(
+                risk["risk_points"]
+            ),
+            2
+        )
+    )
+
+    print(
+        "RR:",
+        risk.get(
+            "rr"
+        )
+    )
+
+    print(
+        "Target:",
+        round(
+            float(
+                risk["target"]
+            ),
+            2
+        )
+    )
+
+    # -----------------------------------------------------
+    # SIGNAL ID
+    # -----------------------------------------------------
+
+    signal_id = (
+        market_name,
+        option_symbol,
+        str(
+            premium_pullback[
+                "date"
+            ]
+        ),
+    )
+
+    if signal_id in PROCESSED_SIGNALS:
+
+        print(
+            "Signal already processed."
+        )
+
+        return None
+
+    # -----------------------------------------------------
+    # RETURN SIGNAL
+    # -----------------------------------------------------
+
     return {
+        "signal_id": signal_id,
+
         "market": market_name,
+
         "direction": direction,
+
         "option_symbol": option_symbol,
+
         "option_token": option_token,
-        "option_exchange": config["option_exchange"],
+
+        "option_exchange": config[
+            "option_exchange"
+        ],
+
         "quantity": quantity,
-        "entry": risk["entry"],
-        "stop_loss": risk["stop_loss"],
-        "target": risk["target"],
-        "risk_points": risk["risk_points"],
+
+        "entry": risk[
+            "entry"
+        ],
+
+        "stop_loss": risk[
+            "stop_loss"
+        ],
+
+        "target": risk[
+            "target"
+        ],
+
+        "risk_points": risk[
+            "risk_points"
+        ],
+
+        "rr": risk.get(
+            "rr"
+        ),
+
+        "setup_strength": setup_strength,
+
         "nifty_or_sensex_breakout": str(
-            breakout["date"]
+            breakout[
+                "date"
+            ]
         ),
+
         "nifty_or_sensex_pullback": str(
-            pullback["date"]
+            pullback[
+                "date"
+            ]
         ),
+
         "premium_breakout": str(
-            premium_breakout["date"]
+            premium_breakout[
+                "date"
+            ]
         ),
+
         "premium_pullback": str(
-            premium_pullback["date"]
+            premium_pullback[
+                "date"
+            ]
+        ),
+
+        "premium_confirmation": (
+            str(
+                premium_confirmation[
+                    "date"
+                ]
+            )
+            if premium_confirmation is not None
+            else None
         ),
     }
 
 
 # =========================================================
-# POSITIONS
+# LIVE POSITION CHECK
 # =========================================================
 
 def has_open_position():
+
+    global PAPER_POSITION
+
+    # -----------------------------------------------------
+    # PAPER
+    # -----------------------------------------------------
+
+    if not LIVE_MODE:
+
+        return (
+            PAPER_POSITION
+            is not None
+        )
+
+    # -----------------------------------------------------
+    # LIVE
+    # -----------------------------------------------------
+
     try:
+
         positions = kite.positions()
 
         for position in positions.get(
             "net",
             []
         ):
+
             if int(
                 position.get(
                     "quantity",
                     0
                 )
             ) != 0:
+
                 return True
 
         return False
 
     except Exception as exc:
+
         print(
             "POSITION ERROR:",
             str(exc)
         )
 
+        # Safety:
+        # Assume position exists if
+        # Zerodha position check fails.
         return True
 
 
@@ -2995,10 +3669,20 @@ def has_open_position():
 # =========================================================
 
 def place_buy(signal):
+
+    global PAPER_POSITION
+    global TRADES_TODAY
+
     print()
-    print("==========================================")
-    print("             TRADE SIGNAL")
-    print("==========================================")
+    print(
+        "=========================================="
+    )
+    print(
+        "             TRADE SIGNAL"
+    )
+    print(
+        "=========================================="
+    )
 
     print(
         "Market:",
@@ -3027,17 +3711,26 @@ def place_buy(signal):
 
     print(
         "Entry:",
-        round(signal["entry"], 2)
+        round(
+            signal["entry"],
+            2
+        )
     )
 
     print(
         "SL:",
-        round(signal["stop_loss"], 2)
+        round(
+            signal["stop_loss"],
+            2
+        )
     )
 
     print(
         "Target:",
-        round(signal["target"], 2)
+        round(
+            signal["target"],
+            2
+        )
     )
 
     # =====================================================
@@ -3045,36 +3738,108 @@ def place_buy(signal):
     # =====================================================
 
     if not LIVE_MODE:
+
+        if PAPER_POSITION is not None:
+
+            print(
+                "PAPER POSITION ALREADY OPEN."
+            )
+
+            return False
+
+        PAPER_POSITION = signal.copy()
+
+        PAPER_POSITION[
+            "entry_time"
+        ] = str(
+            now_ist()
+        )
+
+        PAPER_POSITION[
+            "status"
+        ] = "PAPER_OPEN"
+
+        print()
         print(
-            "PAPER MODE: NO REAL ORDER PLACED."
+            "PAPER MODE:"
+        )
+
+        print(
+            "SIMULATED BUY EXECUTED."
+        )
+
+        print(
+            "Entry:",
+            PAPER_POSITION[
+                "entry"
+            ]
+        )
+
+        print(
+            "SL:",
+            PAPER_POSITION[
+                "stop_loss"
+            ]
+        )
+
+        print(
+            "Target:",
+            PAPER_POSITION[
+                "target"
+            ]
+        )
+
+        TRADES_TODAY += 1
+
+        PROCESSED_SIGNALS.add(
+            signal[
+                "signal_id"
+            ]
         )
 
         record_trade(
-            signal,
-            "PAPER_TRADE"
+            PAPER_POSITION,
+            "PAPER_OPEN"
         )
 
         return True
 
     # =====================================================
-    # LIVE ORDER
+    # LIVE MODE
     # =====================================================
 
     try:
+
         order_id = kite.place_order(
+
             variety=kite.VARIETY_REGULAR,
+
             exchange=signal[
                 "option_exchange"
             ],
+
             tradingsymbol=signal[
                 "option_symbol"
             ],
-            transaction_type=kite.TRANSACTION_TYPE_BUY,
-            quantity=signal["quantity"],
+
+            transaction_type=(
+                kite.TRANSACTION_TYPE_BUY
+            ),
+
+            quantity=signal[
+                "quantity"
+            ],
+
             product=kite.PRODUCT_MIS,
-            order_type=kite.ORDER_TYPE_MARKET,
+
+            order_type=(
+                kite.ORDER_TYPE_MARKET
+            ),
+
             validity=kite.VALIDITY_DAY,
+
             market_protection=-1,
+
             tag="NIF_SEN_ALGO",
         )
 
@@ -3083,8 +3848,14 @@ def place_buy(signal):
             order_id
         )
 
-        # Dashboard is updated ONLY
-        # after Zerodha accepts the order.
+        TRADES_TODAY += 1
+
+        PROCESSED_SIGNALS.add(
+            signal[
+                "signal_id"
+            ]
+        )
+
         record_trade(
             signal,
             "LIVE_ORDER_PLACED",
@@ -3094,15 +3865,421 @@ def place_buy(signal):
         return True
 
     except Exception as exc:
+
+        print()
         print(
             "BUY ORDER ERROR:",
             type(exc).__name__,
             str(exc)
         )
 
-        # Failed LIVE order is not
-        # recorded as a successful trade.
         return False
+
+
+# =========================================================
+# PAPER POSITION MONITOR
+# =========================================================
+
+def monitor_paper_trade():
+
+    global PAPER_POSITION
+
+    if LIVE_MODE:
+        return
+
+    if PAPER_POSITION is None:
+        return
+
+    position = PAPER_POSITION
+
+    symbol = position[
+        "option_symbol"
+    ]
+
+    exchange = position[
+        "option_exchange"
+    ]
+
+    ltp = option_ltp(
+        exchange,
+        symbol
+    )
+
+    if ltp is None:
+
+        print(
+            "Unable to get PAPER LTP."
+        )
+
+        return
+
+    print()
+    print(
+        "=========================================="
+    )
+    print(
+        "          PAPER TRADE MONITOR"
+    )
+    print(
+        "=========================================="
+    )
+
+    print(
+        "Symbol:",
+        symbol
+    )
+
+    print(
+        "Entry:",
+        position["entry"]
+    )
+
+    print(
+        "Current LTP:",
+        ltp
+    )
+
+    print(
+        "SL:",
+        position["stop_loss"]
+    )
+
+    print(
+        "Target:",
+        position["target"]
+    )
+
+    # -----------------------------------------------------
+    # FORCE EXIT
+    # -----------------------------------------------------
+
+    if now_ist().time() >= FORCE_EXIT_TIME:
+
+        exit_price = ltp
+
+        pnl_points = (
+            exit_price
+            -
+            position["entry"]
+        )
+
+        pnl = (
+            pnl_points
+            *
+            position["quantity"]
+        )
+
+        position[
+            "exit"
+        ] = round(
+            exit_price,
+            2
+        )
+
+        position[
+            "exit_time"
+        ] = str(
+            now_ist()
+        )
+
+        position[
+            "result"
+        ] = (
+            "WIN"
+            if pnl > 0
+            else "LOSS"
+        )
+
+        position[
+            "pnl_points"
+        ] = pnl_points
+
+        position[
+            "pnl"
+        ] = round(
+            pnl,
+            2
+        )
+
+        print()
+        print(
+            "PAPER FORCE EXIT"
+        )
+
+        print(
+            "Exit:",
+            exit_price
+        )
+
+        print(
+            "P&L:",
+            round(
+                pnl,
+                2
+            )
+        )
+
+        record_trade(
+            position,
+            "PAPER_FORCE_EXIT"
+        )
+
+        PAPER_POSITION = None
+
+        return
+
+    # -----------------------------------------------------
+    # TARGET
+    # -----------------------------------------------------
+
+    if ltp >= position[
+        "target"
+    ]:
+
+        exit_price = position[
+            "target"
+        ]
+
+        pnl_points = (
+            exit_price
+            -
+            position["entry"]
+        )
+
+        pnl = (
+            pnl_points
+            *
+            position["quantity"]
+        )
+
+        position[
+            "exit"
+        ] = exit_price
+
+        position[
+            "exit_time"
+        ] = str(
+            now_ist()
+        )
+
+        position[
+            "result"
+        ] = "WIN"
+
+        position[
+            "pnl_points"
+        ] = pnl_points
+
+        position[
+            "pnl"
+        ] = round(
+            pnl,
+            2
+        )
+
+        print()
+        print(
+            "PAPER TARGET HIT"
+        )
+
+        print(
+            "Exit:",
+            exit_price
+        )
+
+        print(
+            "P&L:",
+            round(
+                pnl,
+                2
+            )
+        )
+
+        record_trade(
+            position,
+            "PAPER_WIN"
+        )
+
+        PAPER_POSITION = None
+
+        return
+
+    # -----------------------------------------------------
+    # STOP LOSS
+    # -----------------------------------------------------
+
+    if ltp <= position[
+        "stop_loss"
+    ]:
+
+        exit_price = position[
+            "stop_loss"
+        ]
+
+        pnl_points = (
+            exit_price
+            -
+            position["entry"]
+        )
+
+        pnl = (
+            pnl_points
+            *
+            position["quantity"]
+        )
+
+        position[
+            "exit"
+        ] = exit_price
+
+        position[
+            "exit_time"
+        ] = str(
+            now_ist()
+        )
+
+        position[
+            "result"
+        ] = "LOSS"
+
+        position[
+            "pnl_points"
+        ] = pnl_points
+
+        position[
+            "pnl"
+        ] = round(
+            pnl,
+            2
+        )
+
+        print()
+        print(
+            "PAPER STOP LOSS HIT"
+        )
+
+        print(
+            "Exit:",
+            exit_price
+        )
+
+        print(
+            "P&L:",
+            round(
+                pnl,
+                2
+            )
+        )
+
+        record_trade(
+            position,
+            "PAPER_LOSS"
+        )
+
+        PAPER_POSITION = None
+
+        return
+
+    print(
+        "PAPER POSITION STILL OPEN."
+    )
+
+
+# =========================================================
+# LIVE POSITION MONITOR
+# =========================================================
+
+def monitor_live_trade():
+
+    if not LIVE_MODE:
+        return
+
+    try:
+
+        positions = kite.positions()
+
+    except Exception as exc:
+
+        print(
+            "LIVE POSITION ERROR:",
+            str(exc)
+        )
+
+        return
+
+    for position in positions.get(
+        "net",
+        []
+    ):
+
+        try:
+
+            quantity = int(
+                position.get(
+                    "quantity",
+                    0
+                )
+            )
+
+            if quantity == 0:
+                continue
+
+            symbol = position.get(
+                "tradingsymbol"
+            )
+
+            exchange = position.get(
+                "exchange"
+            )
+
+            average_price = float(
+                position.get(
+                    "average_price",
+                    0
+                )
+            )
+
+            ltp = float(
+                position.get(
+                    "last_price",
+                    0
+                )
+            )
+
+            print()
+            print(
+                "=========================================="
+            )
+            print(
+                "           LIVE POSITION"
+            )
+            print(
+                "=========================================="
+            )
+
+            print(
+                "Symbol:",
+                symbol
+            )
+
+            print(
+                "Quantity:",
+                quantity
+            )
+
+            print(
+                "Average price:",
+                average_price
+            )
+
+            print(
+                "LTP:",
+                ltp
+            )
+
+        except Exception:
+
+            continue
 
 
 # =========================================================
@@ -3110,55 +4287,148 @@ def place_buy(signal):
 # =========================================================
 
 def main():
-    print()
-    print("==========================================")
-    print("     NIFTY + SENSEX LIVE TRADER")
-    print("          EMA20 + VWAP ONLY")
-    print("==========================================")
 
-    print("TIME:", now_ist())
+    global PAPER_POSITION
+
+    reset_daily_state_if_needed()
+
+    print()
+    print(
+        "=========================================="
+    )
+    print(
+        "     NIFTY + SENSEX LIVE TRADER"
+    )
+    print(
+        "          EMA20 + VWAP ONLY"
+    )
+    print(
+        "=========================================="
+    )
+
+    print(
+        "TIME:",
+        now_ist()
+    )
 
     print(
         "MODE:",
-        "LIVE" if LIVE_MODE else "PAPER"
+        "LIVE"
+        if LIVE_MODE
+        else "PAPER"
+    )
+
+    print(
+        "TRADES TODAY:",
+        TRADES_TODAY,
+        "/",
+        MAX_TRADES_PER_DAY
     )
 
     if not test_connection():
         return
 
     if not market_is_open():
-        print("Market is closed.")
+
+        print(
+            "Market is closed."
+        )
+
         return
 
-    if not entry_window_open():
-        print("Outside entry window.")
-        print("No new trade will be entered.")
-        return
+    # -----------------------------------------------------
+    # MONITOR EXISTING POSITION FIRST
+    # -----------------------------------------------------
 
     if has_open_position():
-        print("Existing position detected.")
-        print("No new trade.")
+
+        if not LIVE_MODE:
+
+            monitor_paper_trade()
+
+        else:
+
+            monitor_live_trade()
+
+        if has_open_position():
+
+            print(
+                "Existing position detected."
+            )
+
+            print(
+                "No new trade."
+            )
+
+            return
+
+    # -----------------------------------------------------
+    # ENTRY WINDOW
+    # -----------------------------------------------------
+
+    if not entry_window_open():
+
+        print(
+            "Outside entry window."
+        )
+
+        print(
+            "No new trade will be entered."
+        )
+
         return
 
-    print()
-    print("Loading NFO instruments...")
+    # -----------------------------------------------------
+    # DAILY LIMIT
+    # -----------------------------------------------------
 
-    nfo_instruments = get_instruments("NFO")
+    if TRADES_TODAY >= MAX_TRADES_PER_DAY:
+
+        print(
+            "MAX DAILY TRADES REACHED."
+        )
+
+        return
+
+    # -----------------------------------------------------
+    # INSTRUMENTS
+    # -----------------------------------------------------
+
+    print()
+    print(
+        "Loading NFO instruments..."
+    )
+
+    nfo_instruments = get_instruments(
+        "NFO"
+    )
 
     print(
         "NFO instruments:",
-        len(nfo_instruments)
+        len(
+            nfo_instruments
+        )
     )
 
     print()
-    print("Loading BFO instruments...")
+    print(
+        "Loading BFO instruments..."
+    )
 
-    bfo_instruments = get_instruments("BFO")
+    bfo_instruments = get_instruments(
+        "BFO"
+    )
 
     print(
         "BFO instruments:",
-        len(bfo_instruments)
+        len(
+            bfo_instruments
+        )
     )
+
+    # -----------------------------------------------------
+    # CHECK MARKETS
+    # -----------------------------------------------------
 
     nifty_signal = check_market(
         "NIFTY",
@@ -3175,21 +4445,36 @@ def main():
     signals = []
 
     if nifty_signal is not None:
-        signals.append(nifty_signal)
+
+        signals.append(
+            nifty_signal
+        )
 
     if sensex_signal is not None:
-        signals.append(sensex_signal)
+
+        signals.append(
+            sensex_signal
+        )
+
+    # -----------------------------------------------------
+    # NO SIGNAL
+    # -----------------------------------------------------
 
     if not signals:
+
         print()
         print(
             "NO TRADE ON NIFTY OR SENSEX."
         )
+
         return
 
-    selected = signals[0]
+    # -----------------------------------------------------
+    # SHOW SIGNALS
+    # -----------------------------------------------------
 
     for signal in signals:
+
         print()
         print(
             "VALID SIGNAL:",
@@ -3198,6 +4483,28 @@ def main():
             signal["option_symbol"]
         )
 
+        print(
+            "Entry:",
+            signal["entry"]
+        )
+
+        print(
+            "SL:",
+            signal["stop_loss"]
+        )
+
+        print(
+            "Target:",
+            signal["target"]
+        )
+
+    # -----------------------------------------------------
+    # SAME PRIORITY AS BACKTEST:
+    # NIFTY FIRST, THEN SENSEX
+    # -----------------------------------------------------
+
+    selected = signals[0]
+
     print()
     print(
         "SELECTED:",
@@ -3205,7 +4512,19 @@ def main():
         selected["option_symbol"]
     )
 
-    place_buy(selected)
+    # -----------------------------------------------------
+    # EXECUTE
+    # -----------------------------------------------------
+
+    success = place_buy(
+        selected
+    )
+
+    if not success:
+
+        print(
+            "TRADE WAS NOT EXECUTED."
+        )
 
 
 # =========================================================
@@ -3213,15 +4532,42 @@ def main():
 # =========================================================
 
 def wait_for_market_open():
-    print()
-    print("==========================================")
-    print("       NIFTY + SENSEX TRADING BOT")
-    print("==========================================")
 
-    print("MARKET OPEN :", MARKET_OPEN)
-    print("ENTRY START :", ENTRY_START)
-    print("ENTRY END   :", ENTRY_END)
-    print("MARKET CLOSE:", MARKET_CLOSE)
+    print()
+    print(
+        "=========================================="
+    )
+    print(
+        "       NIFTY + SENSEX TRADING BOT"
+    )
+    print(
+        "=========================================="
+    )
+
+    print(
+        "MARKET OPEN :",
+        MARKET_OPEN
+    )
+
+    print(
+        "ENTRY START :",
+        ENTRY_START
+    )
+
+    print(
+        "ENTRY END   :",
+        ENTRY_END
+    )
+
+    print(
+        "FORCE EXIT  :",
+        FORCE_EXIT_TIME
+    )
+
+    print(
+        "MARKET CLOSE:",
+        MARKET_CLOSE
+    )
 
     print(
         "CHECK EVERY :",
@@ -3229,21 +4575,39 @@ def wait_for_market_open():
         "seconds"
     )
 
-    print("==========================================")
+    print(
+        "=========================================="
+    )
 
     while True:
+
         now = now_ist()
 
         if now.time() >= MARKET_CLOSE:
+
             print()
-            print("MARKET CLOSED - BOT STOPPED")
-            print("BOT TIME:", now)
+            print(
+                "MARKET CLOSED - BOT STOPPED"
+            )
+
+            print(
+                "BOT TIME:",
+                now
+            )
+
             return False
 
         if now.time() >= MARKET_OPEN:
+
             print()
-            print("Market is open.")
-            print("Starting strategy checks...")
+            print(
+                "Market is open."
+            )
+
+            print(
+                "Starting strategy checks..."
+            )
+
             return True
 
         print(
@@ -3261,65 +4625,118 @@ def wait_for_market_open():
 # =========================================================
 
 def run_bot():
-    # Create dashboard immediately.
+
     create_dashboard()
 
+    reset_daily_state_if_needed()
+
     if not wait_for_market_open():
+
         return
 
     while True:
+
         now = now_ist()
 
         if now.time() >= MARKET_CLOSE:
+
             print()
-            print("MARKET CLOSED - BOT STOPPED")
-            print("BOT TIME:", now)
-            print("MARKET CLOSE:", MARKET_CLOSE)
+            print(
+                "MARKET CLOSED - BOT STOPPED"
+            )
+
+            print(
+                "BOT TIME:",
+                now
+            )
+
             print(
                 "Trading bot stopped for today."
             )
+
             break
 
         print()
-        print("------------------------------------------")
-        print("BOT TIME:", now)
-        print("------------------------------------------")
+        print(
+            "------------------------------------------"
+        )
+
+        print(
+            "BOT TIME:",
+            now
+        )
+
+        print(
+            "------------------------------------------"
+        )
 
         try:
+
             main()
 
         except Exception as exc:
+
             print()
-            print("==========================================")
-            print("          UNEXPECTED BOT ERROR")
-            print("==========================================")
+            print(
+                "=========================================="
+            )
+
+            print(
+                "          UNEXPECTED BOT ERROR"
+            )
+
+            print(
+                "=========================================="
+            )
+
             print(
                 "ERROR TYPE:",
                 type(exc).__name__
             )
-            print("ERROR:", str(exc))
+
+            print(
+                "ERROR:",
+                str(exc)
+            )
 
         now = now_ist()
 
         if now.time() >= MARKET_CLOSE:
+
             print()
-            print("MARKET CLOSED - BOT STOPPED")
-            print("BOT TIME:", now)
+            print(
+                "MARKET CLOSED - BOT STOPPED"
+            )
+
+            print(
+                "BOT TIME:",
+                now
+            )
+
             print(
                 "Trading bot stopped for today."
             )
+
             break
 
         print()
         print(
-            "Next strategy check in 5 minutes..."
+            "Next strategy check in",
+            CHECK_INTERVAL_SECONDS,
+            "seconds..."
+        )
+
+        next_check = (
+            now
+            +
+            pd.Timedelta(
+                seconds=CHECK_INTERVAL_SECONDS
+            )
         )
 
         print(
             "Next check approximately:",
-            now + pd.Timedelta(
-                seconds=CHECK_INTERVAL_SECONDS
-            )
+            next_check
         )
 
         print()
@@ -3334,20 +4751,40 @@ def run_bot():
 # =========================================================
 
 if __name__ == "__main__":
+
     try:
+
         run_bot()
 
     except KeyboardInterrupt:
+
         print()
-        print("==========================================")
-        print("       BOT STOPPED MANUALLY")
-        print("==========================================")
+        print(
+            "=========================================="
+        )
+
+        print(
+            "       BOT STOPPED MANUALLY"
+        )
+
+        print(
+            "=========================================="
+        )
 
     except Exception as exc:
+
         print()
-        print("==========================================")
-        print("       FATAL BOT ERROR")
-        print("==========================================")
+        print(
+            "=========================================="
+        )
+
+        print(
+            "       FATAL BOT ERROR"
+        )
+
+        print(
+            "=========================================="
+        )
 
         print(
             "ERROR TYPE:",
